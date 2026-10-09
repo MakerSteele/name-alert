@@ -1,0 +1,4 @@
+vosk>=0.3.41
+sounddevice>=0.5
+pystray>=0.19
+pillow>=10

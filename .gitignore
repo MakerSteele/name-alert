@@ -1,0 +1,12 @@
+# speech model (downloaded, ~40 MB)
+vosk-model-*/
+model.zip
+# build output
+build/
+dist/
+*.spec
+# local runtime files
+*.log
+name_alert_settings.json
+__pycache__/
+*.pyc
