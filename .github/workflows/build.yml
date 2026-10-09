@@ -1,0 +1,50 @@
+name: Build Windows exe
+
+on:
+  push:
+    tags: ["v*"]          # push a tag like v1.0.0 to build + publish a Release
+  workflow_dispatch:      # or run it manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade -r requirements.txt pyinstaller
+
+      - name: Download speech model
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest 'https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip' -OutFile model.zip
+          Expand-Archive model.zip -DestinationPath . -Force
+
+      - name: Build exe
+        run: >
+          python -m PyInstaller --noconfirm --clean --windowed --name NameAlert
+          --add-data "vosk-model-small-en-us-0.15;vosk-model-small-en-us-0.15"
+          --collect-binaries vosk --hidden-import pystray._win32 name_alert.py
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\NameAlert -DestinationPath NameAlert-win64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NameAlert-win64
+          path: NameAlert-win64.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NameAlert-win64.zip
