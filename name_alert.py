@@ -34,7 +34,7 @@ from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
 
 APP_NAME = "Name Alert"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # ----------------------------------------------------------------- paths
 FROZEN = getattr(sys, "frozen", False)  # True when running as the PyInstaller .exe
@@ -396,15 +396,33 @@ class Listener(threading.Thread):
                                        channels=1, callback=on_audio):
                     log(f"Mic ON  names={wake}  min conf={s['min_conf']:.2f}  "
                         f"gain={s['mic_gain']}  mic={s['mic_name'] or 'default'}")
+                    unknown = [w for w in wake + decoys
+                               if app.model.vosk_model_find_word(w) < 0]
+                    if unknown:
+                        log(f"Not in vocabulary (ignored): {unknown}")
+                    hb_t, hb_sum, hb_n, hb_peak, hb_phr = time.monotonic(), 0.0, 0, 0.0, 0
                     while (app.enabled.is_set() and not app.stop_evt.is_set()
                            and not app.reload_evt.is_set()):
+                        if time.monotonic() - hb_t >= 60:   # once a minute: is audio arriving?
+                            log(f"audio  avg level {hb_sum / max(hb_n, 1):.0f}%  "
+                                f"peak {hb_peak:.0f}%  phrases heard {hb_phr}")
+                            if hb_n == 0 or hb_peak < 5:
+                                log("WARNING: microphone seems silent - check mic selection, "
+                                    "mute, or Windows microphone privacy settings")
+                            hb_t, hb_sum, hb_n, hb_peak, hb_phr = time.monotonic(), 0.0, 0, 0.0, 0
                         try:
                             data = audio_q.get(timeout=0.3)
                         except queue.Empty:
                             continue
                         data, app.level = process_block(data, float(s["mic_gain"]))
+                        hb_sum += app.level
+                        hb_n += 1
+                        hb_peak = max(hb_peak, app.level)
                         if rec.AcceptWaveform(data):
-                            self.check(json.loads(rec.Result()), s)
+                            r = json.loads(rec.Result())
+                            if r.get("text"):
+                                hb_phr += 1
+                            self.check(r, s)
                 app.level = 0.0
                 log("Mic OFF" if not app.reload_evt.is_set() else "Settings changed - restarting mic")
             except Exception as e:
@@ -456,6 +474,9 @@ class MainWindow:
         self.level_bar.pack(side="left", fill="x", expand=True, padx=6)
         self.status_lbl = ttk.Label(t, foreground="#444")
         self.status_lbl.pack(anchor="w", **pad)
+        self.mic_warn = ttk.Label(t, foreground="#d00000", wraplength=480)
+        self.mic_warn.pack(anchor="w", padx=8)
+        self.quiet_since = None
         ttk.Label(t, text="Recent activity (NAME = your name, decoy = sound-alike):").pack(
             anchor="w", padx=8)
         hf = ttk.Frame(t)
@@ -478,15 +499,22 @@ class MainWindow:
         self.wake_txt = tk.Text(t, height=3, font=("Segoe UI", 10))
         self.wake_txt.insert("1.0", ", ".join(s["wake_words"]))
         self.wake_txt.pack(fill="x", **pad)
+        self.wake_vocab_lbl = ttk.Label(t, wraplength=480)
+        self.wake_vocab_lbl.pack(anchor="w", padx=8)
         ttk.Label(t, text="Sound-alike decoys (reduce false alarms; words that sound like "
                           "your name):", wraplength=480).pack(anchor="w", **pad)
         self.decoy_txt = tk.Text(t, height=5, font=("Segoe UI", 10))
         self.decoy_txt.insert("1.0", ", ".join(s["decoy_words"]))
         self.decoy_txt.pack(fill="x", **pad)
-        ttk.Button(t, text="Check words against speech model",
-                   command=self.check_words).pack(anchor="w", **pad)
-        self.check_lbl = ttk.Label(t, wraplength=480)
-        self.check_lbl.pack(anchor="w", **pad)
+        self.decoy_vocab_lbl = ttk.Label(t, wraplength=480)
+        self.decoy_vocab_lbl.pack(anchor="w", padx=8)
+        ttk.Label(t, text="Words in red are not in the speech model's vocabulary and will "
+                          "be ignored. Try a different spelling or a nickname.",
+                  foreground="#666", wraplength=480).pack(anchor="w", **pad)
+        self._vocab_job = None
+        for txt in (self.wake_txt, self.decoy_txt):
+            txt.tag_configure("bad", foreground="#d00000", underline=True)
+            txt.bind("<KeyRelease>", self.schedule_vocab_check)
 
         # ---- Audio tab
         t = ttk.Frame(nb)
@@ -575,6 +603,7 @@ class MainWindow:
         nb.select(tab)
         self.refresh_status()
         self.poll()
+        self.check_words()
         self.win.lift()
         self.win.focus_force()
 
@@ -597,22 +626,43 @@ class MainWindow:
                                  parent=self.win)
             self.startup_var.set(startup_enabled())
 
+    def schedule_vocab_check(self, event=None):
+        if self._vocab_job:
+            self.win.after_cancel(self._vocab_job)
+        self._vocab_job = self.win.after(300, self.check_words)
+
     def check_words(self):
-        model = self.app.model
-        if model is None:
-            self.check_lbl.configure(text="Speech model is still loading - try again in a "
-                                          "few seconds.", foreground="#a60")
+        """Underline unknown words in red inside both boxes + summary under each."""
+        self._vocab_job = None
+        if self.win is None:
             return
-        words = parse_words(self.wake_txt.get("1.0", "end")) + \
-            parse_words(self.decoy_txt.get("1.0", "end"))
-        missing = [w for w in words if model.vosk_model_find_word(w) < 0]
-        if missing:
-            self.check_lbl.configure(
-                text="NOT in the speech model (these will be ignored - try a different "
-                     "spelling or a nickname): " + ", ".join(missing), foreground="#c00")
-        else:
-            self.check_lbl.configure(text=f"All {len(words)} words are recognized.",
-                                     foreground="#080")
+        model = self.app.model
+        for txt, lbl in ((self.wake_txt, self.wake_vocab_lbl),
+                         (self.decoy_txt, self.decoy_vocab_lbl)):
+            txt.tag_remove("bad", "1.0", "end")
+            if model is None:
+                lbl.configure(text="Checking vocabulary once the speech model loads...",
+                              foreground="#666")
+                continue
+            content = txt.get("1.0", "end-1c")
+            bad, good = [], 0
+            for m in re.finditer(r"[A-Za-z']+", content):
+                w = m.group(0).lower()
+                if model.vosk_model_find_word(w) < 0:
+                    txt.tag_add("bad", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
+                    if w not in bad:
+                        bad.append(w)
+                else:
+                    good += 1
+            if bad:
+                lbl.configure(text="\u2717 Not in vocabulary (ignored): " + ", ".join(bad),
+                              foreground="#d00000")
+            elif good:
+                lbl.configure(text=f"\u2713 All {good} words recognized", foreground="#080")
+            else:
+                lbl.configure(text="")
+        if model is None:
+            self._vocab_job = self.win.after(1000, self.check_words)
 
     def refresh_status(self, update_slider=False):
         on = self.app.enabled.is_set()
@@ -633,6 +683,16 @@ class MainWindow:
         if self.win is None:
             return
         self.level_bar["value"] = self.app.level
+        # Warn if listening but the mic has been dead silent for 8+ seconds
+        if self.app.enabled.is_set() and self.app.settings["wake_words"] and self.app.level < 3:
+            self.quiet_since = self.quiet_since or time.monotonic()
+            if time.monotonic() - self.quiet_since > 8:
+                self.mic_warn.configure(
+                    text="No sound from the microphone. Check the mic on the Audio tab, "
+                         "your mute switch/key, and Windows Settings > Privacy > Microphone.")
+        else:
+            self.quiet_since = None
+            self.mic_warn.configure(text="")
         if HISTORY_COUNT[0] != self.shown_count:
             self.shown_count = HISTORY_COUNT[0]
             self.history.delete(0, "end")
