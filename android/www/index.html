@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Name Alert</title>
+<style>
+  :root { --bg:#0f1626; --card:#18223a; --line:#2a3654; --text:#eef2fa; --muted:#9aa6c0;
+          --green:#1fae3a; --red:#ff3b3b; --gray:#5c6680; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui, -apple-system, Roboto, sans-serif;
+         padding: calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 24px); }
+  h1 { font-size:26px; margin:4px 2px 12px; letter-spacing:-.01em; }
+  h1 span { color:var(--red); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  .card h2 { font-size:15px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; }
+  button { font:inherit; border:0; border-radius:10px; padding:12px 14px; color:#fff; background:#2d3a5c; }
+  button.big { width:100%; font-size:20px; font-weight:800; padding:18px; }
+  .on { background:var(--green); } .off { background:var(--gray); }
+  .row { display:flex; gap:10px; align-items:center; margin:8px 0; }
+  .row > * { flex:1; }
+  .bar { height:12px; background:#0b1120; border-radius:6px; overflow:hidden; border:1px solid var(--line); }
+  .bar i { display:block; height:100%; width:0; background:var(--green); transition:width .1s; }
+  .muted { color:var(--muted); font-size:14px; }
+  textarea, input[type=number] { width:100%; font:inherit; color:var(--text); background:#0b1120; border:1px solid var(--line);
+         border-radius:10px; padding:10px; }
+  textarea { min-height:64px; resize:vertical; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { font-size:13px; padding:3px 9px; border-radius:999px; border:1px solid var(--line); }
+  .chip.ok { color:#7ee08f; border-color:#2e6b3a; } .chip.bad { color:#ff8a8a; border-color:#8a2b2b; text-decoration:underline; }
+  .warn { background:#3a1a1f; border:1px solid #7a2a33; color:#ffd0d4; border-radius:10px; padding:10px; margin:8px 0; font-size:14px; }
+  .warn button { margin-top:8px; background:#7a2a33; padding:8px 12px; }
+  label.sw { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
+  label.sw:last-child { border-bottom:0; }
+  input[type=checkbox] { width:22px; height:22px; accent-color:var(--green); }
+  input[type=range] { width:100%; accent-color:var(--red); }
+  #log { font:12px/1.5 ui-monospace, monospace; white-space:pre; overflow:auto; max-height:220px; background:#0b1120;
+         border-radius:10px; padding:8px; color:#c9d2e3; }
+  .save { position:sticky; bottom:10px; width:100%; background:var(--red); font-weight:800; font-size:18px;
+          box-shadow:0 8px 24px rgba(0,0,0,.4); }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <h1>Name <span>Alert</span></h1>
+
+  <div class="card">
+    <button id="toggle" class="big off">Start listening</button>
+    <div class="row"><span style="flex:0 0 auto" class="muted">Mic</span><div class="bar"><i id="level"></i></div></div>
+    <div id="status" class="muted">Stopped</div>
+    <div id="warnings"></div>
+    <div class="row"><button id="test">Test alert</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Your names</h2>
+    <div class="muted">Your name and nicknames. Single words, separated by commas.</div>
+    <textarea id="wakeWords" placeholder="steven, steve"></textarea>
+    <div id="wakeChips" class="chips"></div>
+    <h2 style="margin-top:16px">Sound-alikes</h2>
+    <div class="muted">Words that sound like your name. They reduce false alarms.</div>
+    <textarea id="decoyWords"></textarea>
+    <div id="decoyChips" class="chips"></div>
+    <div id="vocabNote" class="muted" style="margin-top:6px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Sensitivity</h2>
+    <div class="row"><input id="minConf" type="range" min="0.40" max="0.95" step="0.01"><span id="minConfVal" style="flex:0 0 3em;text-align:right"></span></div>
+    <div class="muted">Lower catches more. Higher means fewer false alarms.</div>
+    <div class="row"><span>Mic boost</span><input id="gain" type="range" min="1" max="4" step="0.1"><span id="gainVal" style="flex:0 0 3em;text-align:right"></span></div>
+    <div class="row"><span>Cooldown (s)</span><input id="cooldownSec" type="number" min="0" max="120" step="1"></div>
+  </div>
+
+  <div class="card">
+    <h2>Alerts</h2>
+    <label class="sw">Chime in earbuds <input id="chime" type="checkbox"></label>
+    <label class="sw">Vibrate <input id="vibrate" type="checkbox"></label>
+    <label class="sw">Full-screen red flash <input id="flash" type="checkbox"></label>
+    <div class="row"><span>Flash length (s)</span><input id="flashSeconds" type="number" min="1" max="30" step="0.5"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent activity</h2>
+    <div class="muted">NAME = your name, decoy = sound-alike</div>
+    <div id="log"></div>
+  </div>
+
+  <button id="save" class="save">Save</button>
+  <p class="muted" style="text-align:center">Speech recognition runs entirely on this phone. No audio is saved or sent anywhere.<br>github.com/MakerSteele/name-alert</p>
+
+  <script src="app.js"></script>
+</body>
+</html>
