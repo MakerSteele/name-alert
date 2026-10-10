@@ -34,7 +34,7 @@ from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
 
 APP_NAME = "Name Alert"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # ----------------------------------------------------------------- paths
 FROZEN = getattr(sys, "frozen", False)  # True when running as the PyInstaller .exe
@@ -47,6 +47,9 @@ LOG_FILE = DATA_DIR / "name_alert.log"
 
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 2000                  # 0.125 s of audio per chunk
+DEAD_STREAM_SEC = 10               # no audio data at all this long -> reset audio (sleep/wake)
+SILENT_RESET_SEC = 600             # level stuck near zero this long -> reset audio
+SILENT_LEVEL = 1.0                 # "near zero" on the 0-100 level scale
 TRANSPARENT_KEY = "#010203"        # color Windows treats as see-through
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -270,6 +273,15 @@ def resolve_device(name):
     return None
 
 
+def reset_audio(sd):
+    """Fully restart PortAudio so it re-reads the device list (needed after sleep/wake)."""
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as e:
+        log(f"Audio reset failed: {type(e).__name__}: {e}")
+
+
 def process_block(data, gain):
     """Apply gain (if any) and return (bytes, level 0-100)."""
     a = array("h")
@@ -372,6 +384,7 @@ class Listener(threading.Thread):
             app.ui_q.put(("fatal", f"Could not start speech engine:\n{type(e).__name__}: {e}"))
             return
 
+        resets = 0                               # consecutive audio resets
         while not app.stop_evt.is_set():
             app.reload_evt.clear()
             s = dict(app.settings)               # snapshot
@@ -401,6 +414,8 @@ class Listener(threading.Thread):
                     if unknown:
                         log(f"Not in vocabulary (ignored): {unknown}")
                     hb_t, hb_sum, hb_n, hb_peak, hb_phr = time.monotonic(), 0.0, 0, 0.0, 0
+                    last_data_t = last_sound_t = time.monotonic()
+                    reset_reason = None
                     while (app.enabled.is_set() and not app.stop_evt.is_set()
                            and not app.reload_evt.is_set()):
                         if time.monotonic() - hb_t >= 60:   # once a minute: is audio arriving?
@@ -413,8 +428,19 @@ class Listener(threading.Thread):
                         try:
                             data = audio_q.get(timeout=0.3)
                         except queue.Empty:
+                            if time.monotonic() - last_data_t >= DEAD_STREAM_SEC:
+                                reset_reason = f"no audio data for {DEAD_STREAM_SEC} s"
+                                break
                             continue
+                        now = time.monotonic()
+                        last_data_t = now
                         data, app.level = process_block(data, float(s["mic_gain"]))
+                        if app.level >= SILENT_LEVEL:
+                            last_sound_t = now
+                            resets = 0           # audio is healthy again
+                        elif now - last_sound_t >= SILENT_RESET_SEC:
+                            reset_reason = f"mic silent for {SILENT_RESET_SEC // 60} min"
+                            break
                         hb_sum += app.level
                         hb_n += 1
                         hb_peak = max(hb_peak, app.level)
@@ -424,6 +450,13 @@ class Listener(threading.Thread):
                                 hb_phr += 1
                             self.check(r, s)
                 app.level = 0.0
+                if reset_reason:
+                    resets += 1
+                    log(f"Mic reset #{resets}: {reset_reason} - restarting audio system")
+                    reset_audio(sd)
+                    # back off if the mic stays dead, so the log doesn't fill up
+                    app.stop_evt.wait(1.0 if resets <= 3 else 30.0)
+                    continue
                 log("Mic OFF" if not app.reload_evt.is_set() else "Settings changed - restarting mic")
             except Exception as e:
                 app.level = 0.0
