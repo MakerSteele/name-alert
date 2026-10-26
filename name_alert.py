@@ -34,7 +34,7 @@ from pathlib import Path
 from tkinter import colorchooser, messagebox, ttk
 
 APP_NAME = "Name Alert"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.4"
 
 # ----------------------------------------------------------------- paths
 FROZEN = getattr(sys, "frozen", False)  # True when running as the PyInstaller .exe
@@ -50,6 +50,9 @@ BLOCK_SIZE = 2000                  # 0.125 s of audio per chunk
 DEAD_STREAM_SEC = 10               # no audio data at all this long -> reset audio (sleep/wake)
 SILENT_RESET_SEC = 600             # level stuck near zero this long -> reset audio
 SILENT_LEVEL = 1.0                 # "near zero" on the 0-100 level scale
+STYLE_LABELS = {"border": "Whole screen edge", "corner": "Square in a corner"}
+CORNER_LABELS = {"top-left": "Top left", "top-right": "Top right",
+                 "bottom-left": "Bottom left", "bottom-right": "Bottom right"}
 TRANSPARENT_KEY = "#010203"        # color Windows treats as see-through
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -73,6 +76,9 @@ DEFAULTS = {
     "flash_interval_ms": 250,
     "border_px": 18,
     "border_color": "#FF0000",
+    "alert_style": "border",       # "border" = whole screen edge, "corner" = small square
+    "corner_pos": "top-right",     # top-left / top-right / bottom-left / bottom-right
+    "corner_px": 120,              # square size
     "show_text": True,
     "alert_text": "SOMEONE SAID YOUR NAME",
     "play_sound": True,
@@ -190,6 +196,39 @@ def get_monitors():
     callback = MonitorEnumProc(_cb)
     user32.EnumDisplayMonitors(None, None, callback, 0)
     return monitors or [(0, 0, 1920, 1080)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+user32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(MONITORINFO)]
+user32.GetMonitorInfoW.restype = wt.BOOL
+
+
+def get_work_areas():
+    """Like get_monitors(), but each monitor's area minus the taskbar."""
+    areas = []
+    MonitorEnumProc = ctypes.WINFUNCTYPE(
+        ctypes.c_int, wt.HMONITOR, wt.HDC, ctypes.POINTER(wt.RECT), wt.LPARAM)
+
+    def _cb(hmon, hdc, lprect, lparam):
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            r = mi.rcWork
+        else:
+            r = lprect.contents
+        areas.append((r.left, r.top, r.right - r.left, r.bottom - r.top))
+        return 1
+
+    callback = MonitorEnumProc(_cb)
+    user32.EnumDisplayMonitors(None, None, callback, 0)
+    return areas or get_monitors()
+
+
+CORNER_MARGIN = 16                 # gap between the square and the screen edge
 
 
 def make_click_through(win):
@@ -316,6 +355,9 @@ class Overlay:
         self.windows = []
         s = self.app.settings
         self.monitors = get_monitors()
+        if s["alert_style"] == "corner":
+            self._build_corners(s)
+            return
         for (x, y, w, h) in self.monitors:
             win = tk.Toplevel(self.app.root)
             win.overrideredirect(True)
@@ -333,6 +375,24 @@ class Overlay:
             if s["show_text"] and s["alert_text"].strip():
                 c.create_text(w // 2, bp + 40, text=s["alert_text"],
                               fill=s["border_color"], font=("Segoe UI", 28, "bold"))
+            win.update_idletasks()
+            make_click_through(win)
+            self.windows.append(win)
+
+    def _build_corners(self, s):
+        """One small solid square per monitor, in the chosen corner."""
+        size = max(20, int(s["corner_px"]))
+        pos = s["corner_pos"]
+        for (x, y, w, h) in get_work_areas():
+            sz = min(size, w, h)
+            left = x + CORNER_MARGIN if "left" in pos else x + w - sz - CORNER_MARGIN
+            top = y + CORNER_MARGIN if pos.startswith("top") else y + h - sz - CORNER_MARGIN
+            win = tk.Toplevel(self.app.root)
+            win.overrideredirect(True)
+            win.geometry(f"{sz}x{sz}+{left}+{top}")
+            win.configure(bg=s["border_color"])
+            win.attributes("-topmost", True)
+            win.attributes("-alpha", 0.0)
             win.update_idletasks()
             make_click_through(win)
             self.windows.append(win)
@@ -588,9 +648,24 @@ class MainWindow:
         self.swatch = tk.Label(cf, width=4, bg=self.color, relief="solid", bd=1)
         self.swatch.pack(side="left", padx=6)
         ttk.Button(cf, text="Choose...", command=self.pick_color).pack(side="left")
+        sf = ttk.Frame(t)
+        sf.pack(fill="x", **pad)
+        ttk.Label(sf, text="Alert style:", width=22).pack(side="left")
+        self.style_var = tk.StringVar(
+            value=STYLE_LABELS.get(s["alert_style"], STYLE_LABELS["border"]))
+        ttk.Combobox(sf, textvariable=self.style_var, state="readonly", width=20,
+                     values=list(STYLE_LABELS.values())).pack(side="left")
+        pf = ttk.Frame(t)
+        pf.pack(fill="x", **pad)
+        ttk.Label(pf, text="Corner (square only):", width=22).pack(side="left")
+        self.corner_var = tk.StringVar(value=CORNER_LABELS.get(s["corner_pos"], "Top right"))
+        ttk.Combobox(pf, textvariable=self.corner_var, state="readonly", width=20,
+                     values=list(CORNER_LABELS.values())).pack(side="left")
         self.border_var = tk.StringVar(value=str(s["border_px"]))
         self.flash_var = tk.StringVar(value=str(s["flash_seconds"]))
+        self.corner_px_var = tk.StringVar(value=str(s["corner_px"]))
         for label, var, lo, hi, inc in (("Border thickness (px):", self.border_var, 4, 80, 2),
+                                        ("Square size (px):", self.corner_px_var, 40, 400, 10),
                                         ("Flash length (s):", self.flash_var, 1, 15, 0.5)):
             f = ttk.Frame(t)
             f.pack(fill="x", **pad)
@@ -598,7 +673,7 @@ class MainWindow:
             ttk.Spinbox(f, from_=lo, to=hi, increment=inc, width=6,
                         textvariable=var).pack(side="left")
         self.show_text_var = tk.BooleanVar(value=s["show_text"])
-        ttk.Checkbutton(t, text="Show text at top of screen",
+        ttk.Checkbutton(t, text="Show text at top of screen (edge style only)",
                         variable=self.show_text_var).pack(anchor="w", **pad)
         self.text_var = tk.StringVar(value=s["alert_text"])
         ttk.Entry(t, textvariable=self.text_var).pack(fill="x", **pad)
@@ -746,6 +821,11 @@ class MainWindow:
             s["cooldown_sec"] = max(0.0, float(self.cool_var.get()))
             s["border_color"] = self.color
             s["border_px"] = max(2, min(200, int(float(self.border_var.get()))))
+            s["alert_style"] = next(k for k, v in STYLE_LABELS.items()
+                                    if v == self.style_var.get())
+            s["corner_pos"] = next(k for k, v in CORNER_LABELS.items()
+                                   if v == self.corner_var.get())
+            s["corner_px"] = max(20, min(1000, int(float(self.corner_px_var.get()))))
             s["flash_seconds"] = max(0.5, min(30.0, float(self.flash_var.get())))
             s["show_text"] = bool(self.show_text_var.get())
             s["alert_text"] = self.text_var.get()
